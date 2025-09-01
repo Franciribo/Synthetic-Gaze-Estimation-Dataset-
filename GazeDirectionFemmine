@@ -1,0 +1,274 @@
+import bpy
+import math
+import mathutils
+import bpy_extras
+import csv
+import os
+import time
+from mathutils import Vector
+
+# --- CONFIGURAZIONE ---
+character_name = "MeshHuman"
+eye_left_idx = 593
+eye_right_idx = 6941
+
+controller = "DirezioneSguardo"
+armatura = "Controller"
+
+# Assicurati che l'armatura sia in POSE una sola volta
+armatureController = bpy.data.objects[armatura]
+bpy.context.view_layer.objects.active = armatureController
+if bpy.context.object.mode != 'POSE':
+    bpy.ops.object.mode_set(mode='POSE')
+poseController = armatureController.pose.bones[controller]
+
+group_right = "InternoOcchioDestro"
+group_left = "InternoOcchioSinistro"
+landmark_group_name = "LandmarksCompleto"
+output_csv_path = bpy.path.abspath("//landmarks_2d40M_1920x1080.csv")  # salva accanto al file .blend  
+
+# Parametri per possibili direzione sguardo
+larghezza = 0.184048
+altezza = 0.143708
+cols = 24
+rows = 18  # Totale pose: 432
+
+x_min = -larghezza / 2
+y_min = -altezza / 2
+x_step = larghezza / (cols - 1)
+y_step = altezza / (rows - 1)
+
+positionsEye = [(x_min + col * x_step, y_min + row * y_step, 0)
+                for row in range(rows) for col in range(cols)]
+
+scene = bpy.context.scene
+camera = scene.camera
+
+
+
+# --- RECUPERA OGGETTI ---
+obj = bpy.data.objects[character_name]
+
+# Calcolo iniziale del centro pupille su mesh non deformata
+v_left = obj.data.vertices[eye_left_idx].co
+v_right = obj.data.vertices[eye_right_idx].co
+v_left_world = obj.matrix_world @ v_left
+v_right_world = obj.matrix_world @ v_right
+pupil_center_base = (v_left_world + v_right_world) / 2  # usato per orientare la camera
+
+# --- OTTIENI POSIZIONI CAMERA ---
+nomesfera = "Sfera1"
+sfera = bpy.data.objects.get(nomesfera)
+if sfera is None:
+    raise Exception(f"L'oggetto '{nomesfera}' non è stato trovato.")
+
+grupposcelto = "PosizioniCameraFinale2"
+if grupposcelto not in sfera.vertex_groups:
+    raise Exception(f"Gruppo '{grupposcelto}' non trovato.")
+
+indice_gruppo = sfera.vertex_groups[grupposcelto].index
+vertici_gruppo = [
+    (v.index, sfera.matrix_world @ v.co)
+    for v in sfera.data.vertices
+    if any(g.group == indice_gruppo for g in v.groups)
+]
+
+# --- PRECALCOLA INDICI DEI GRUPPI (una volta) ---
+def collect_group_indices(obj, group_name):
+    group = obj.vertex_groups.get(group_name)
+    if group is None:
+        raise Exception(f"Gruppo '{group_name}' non trovato in {obj.name}")
+    return [v.index for v in obj.data.vertices if any(g.group == group.index and g.weight == 1 for g in v.groups)]
+
+# Landmark e occhi su mesh base (i pesi si assumono fissi)
+#landmark_indices_base = collect_group_indices(obj, landmark_group_name)
+landmark_indices_base = [4,54,107,170,593,1310,1938,1467,1682,1893,17970,17960,17980,
+                        17976,17963,1426,2314,6352,6402,6455,6527,6941,7526,7528,7539,
+                        7546,7549,16396,16926,16553,17067,16881,17995,17985,18005,18001,
+                        17988,16512,17302,16395,1309]
+
+
+right_eye_center_indices_base = collect_group_indices(obj, group_right)
+left_eye_center_indices_base = collect_group_indices(obj, group_left)
+
+# Funzione per centro dati da lista di indici su mesh valutata
+def compute_group_center_world(obj_eval, mesh_eval, indices):
+    if not indices:
+        return None
+    coords = [obj_eval.matrix_world @ mesh_eval.vertices[i].co for i in indices]
+    return sum(coords, Vector((0, 0, 0))) / len(coords)
+
+# Funzione per head pose rispetto camera
+def get_head_pose_relative_to_camera(armature_name="Rig", bone_name="head"):
+    armature = bpy.data.objects.get(armature_name)
+    if armature is None:
+        print(f"Armatura '{armature_name}' non trovata.")
+        return 0.0, 0.0, 0.0
+
+    bone = armature.pose.bones.get(bone_name)
+    if bone is None:
+        print(f"Osso '{bone_name}' non trovato.")
+        return 0.0, 0.0, 0.0
+
+    bone_world_matrix = armature.matrix_world @ bone.matrix
+    bone_in_camera = camera.matrix_world.inverted() @ bone_world_matrix
+    bone_rot_camera = bone_in_camera.to_euler('XYZ')
+    yaw = math.degrees(bone_rot_camera.z)
+    pitch = math.degrees(bone_rot_camera.x)
+    roll = math.degrees(bone_rot_camera.y)
+    return yaw, pitch, roll
+
+# --- INIZIALIZZA FILE CSV E HEADER ---
+header_written = False
+if os.path.exists(output_csv_path) and os.path.getsize(output_csv_path) > 0:
+    header_written = True
+
+file = open(output_csv_path, mode='a', newline='')
+writer = csv.writer(file, delimiter=';')
+
+# --- LOOP PRINCIPALE ---
+for idx, cam_position in vertici_gruppo:
+    
+    # Posiziona la camera
+    camera.location = cam_position
+
+    # Orienta verso centro pupille base
+    direction = pupil_center_base - camera.location
+    direction.normalize()
+    camera.rotation_mode = 'QUATERNION'
+    camera.rotation_quaternion = direction.to_track_quat('-Z', 'Y')
+
+    cam_loc = camera.location
+    cam_rot_euler = camera.rotation_quaternion.to_euler('XYZ')
+    rel_pos = pupil_center_base - cam_loc  # rimane base se non deformi testa prima
+    
+
+    # Assicura che l'armatura sia in POSE (fatto una volta ma ricontrolla)
+    bpy.context.view_layer.objects.active = armatureController
+    if bpy.context.object.mode != 'POSE':
+        bpy.ops.object.mode_set(mode='POSE')
+    
+    t0 = time.perf_counter()
+
+    # Buffer per le 432 pose di questa camera
+    buffer = []
+
+    for i, (x, y, z) in enumerate(positionsEye):
+        poseController.location = (x, y, z)
+        bpy.context.view_layer.update()  # aggiorna la scena con la nuova pose
+
+        # Ottieni mesh valutata dopo la pose
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        obj_eval = obj.evaluated_get(depsgraph)
+        mesh_eval = obj_eval.data
+
+        # Pupille deformate
+        right_eye_pupil = obj_eval.matrix_world @ mesh_eval.vertices[eye_right_idx].co
+        left_eye_pupil = obj_eval.matrix_world @ mesh_eval.vertices[eye_left_idx].co
+        pupil_center = (left_eye_pupil + right_eye_pupil) / 2
+
+        # Centri dei gruppi (usando indici precalcolati)
+        right_eye_center = compute_group_center_world(obj_eval, mesh_eval, right_eye_center_indices_base)
+        left_eye_center = compute_group_center_world(obj_eval, mesh_eval, left_eye_center_indices_base)
+
+        right_gaze_vector = (right_eye_pupil - right_eye_center).normalized() if right_eye_center else Vector((0,0,1))
+        left_gaze_vector = (left_eye_pupil - left_eye_center).normalized() if left_eye_center else Vector((0,0,1))
+        average_gaze_vector = ((right_gaze_vector + left_gaze_vector) * 0.5).normalized()
+
+        cam_matrix = camera.matrix_world.inverted()
+        gaze_cam_space = (cam_matrix.to_3x3() @ average_gaze_vector).normalized()
+        
+        # Head pose rispetto camera
+        yaw, pitch, roll = get_head_pose_relative_to_camera()
+        
+        # Proiezione dei landmark
+        render = scene.render
+        width = render.resolution_x * render.resolution_percentage / 100
+        height = render.resolution_y * render.resolution_percentage / 100
+
+        landmark_data = []
+        for vi in landmark_indices_base:
+            world_coord = obj_eval.matrix_world @ mesh_eval.vertices[vi].co
+            projected = bpy_extras.object_utils.world_to_camera_view(scene, camera, world_coord)
+            pixel_x = projected.x * width
+            pixel_y = (1 - projected.y) * height
+            landmark_data.append([vi, pixel_x, pixel_y])
+
+        # Costruisci riga di dati
+        data = [
+            f"{gaze_cam_space.x:.3f}",
+            f"{gaze_cam_space.y:.3f}",
+            f"{gaze_cam_space.z:.3f}",
+            f"{yaw:.2f}",
+            f"{pitch:.2f}",
+            f"{roll:.2f}",
+            f"{cam_rot_euler.x:.3f}",
+            f"{cam_rot_euler.y:.3f}",
+            f"{cam_rot_euler.z:.3f}",
+            f"{rel_pos.x:.3f}",
+            f"{rel_pos.y:.3f}",
+            f"{rel_pos.z:.3f}"
+        ]
+
+        for row in landmark_data:
+            x = f"{row[1]:.3f}"
+            y = f"{row[2]:.3f}"
+            data.extend([x, y])
+
+        # Costruisci header se serve (solo la prima volta)
+        if not header_written:
+            headers = [
+                'gaze_direction_x', 'gaze_direction_y', 'gaze_direction_z',
+                'head_yaw', 'head_pitch', 'head_roll',
+                'camera_rot_x', 'camera_rot_y', 'camera_rot_z',
+                'camera_x', 'camera_y', 'camera_z'
+            ]
+            for row in landmark_data:
+                idx_land = int(row[0])
+                headers.append(f"{idx_land}_x")
+                headers.append(f"{idx_land}_y")
+            writer.writerow(headers)
+            header_written = True
+
+        buffer.append(data)
+
+    # Dopo le 432 pose per questa camera, scrivi tutto il buffer
+    for row in buffer:
+        writer.writerow(row)
+    # svuota buffer implicito (ri-creato ad ogni iterazione di camera)
+    t1 = time.perf_counter()
+    print(f"Camera {idx}: {len(positionsEye)} pose in {t1 - t0:.2f}s -> { (t1-t0)/len(positionsEye):.2f}s per posa")
+
+# chiudi il file
+file.close()
+print(f"\n✅ Dati aggiunti a CSV: {output_csv_path}")
+
+
+def overwrite_header(csv_path: str, new_header: list[str], delimiter=';'):
+    # Legge tutto
+    with open(csv_path, newline='', encoding='utf-8') as f:
+        rows = list(csv.reader(f, delimiter=delimiter))
+    # Sostituisce la prima riga con new_header
+    rows[0:1] = [new_header]
+    # Riscrive tutto
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f, delimiter=delimiter)
+        writer.writerows(rows)
+
+# === ESEMPIO D'USO ===
+custom_header = [
+    'gaze_direction_x', 'gaze_direction_y', 'gaze_direction_z',
+    'head_yaw', 'head_pitch', 'head_roll',
+    'camera_rot_x', 'camera_rot_y', 'camera_rot_z',
+    'camera_x', 'camera_y', 'camera_z',
+    '476_x', '476_y', '475_x', '475_y', '474_x', '474_y', '477_x', '477_y', '473_x', '473_y',
+    '336_x', '336_y', '454_x', '454_y', '291_x', '291_y', '362_x', '362_y', '327_x', '327_y',
+    '387_x', '387_y', '263_x', '263_y', '384_x', '384_y', '380_x', '380_y', '373_x', '373_y',
+    '432_x', '432_y', '460_x', '460_y', '469_x', '469_y', '470_x', '470_y', '471_x', '471_y',
+    '472_x', '472_y', '468_x', '468_y', '168_x', '168_y', '6_x', '6_y', '1_x', '1_y', '0_x', '0_y',
+    '17_x', '17_y', '107_x', '107_y', '234_x', '234_y', '61_x', '61_y', '133_x', '133_y', '98_x', '98_y',
+    '160_x', '160_y', '33_x', '33_y', '158_x', '158_y', '153_x', '153_y', '144_x', '144_y',
+    '212_x', '212_y', '240_x', '240_y', '70_x', '70_y', '300_x', '300_y'
+]
+overwrite_header(output_csv_path, custom_header, delimiter=';')
+print(f"Header sovrascritto in: {output_csv_path}")
