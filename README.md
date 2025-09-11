@@ -3,9 +3,7 @@ Synthetic Gaze Estimation Dataset
 
 Questo progetto utilizza Blender per generare un dataset sintetico per la stima dello sguardo (“gaze estimation”). La generazione di immagini 3D rende possibile creare molteplici variazioni con annotazioni automatiche perfette
 github.com
-, superando i limiti dei dataset reali. Ad esempio, il dataset GazeGene di Bao et al. mostra come un grande dataset sintetico con campioni fotorealistici possa fornire annotazioni di sguardo molto accurate e dettagli 3D della struttura oculare
-cvpr.thecvf.com
-. Qui lo script Python controlla la scena in Blender per produrre diverse direzioni di sguardo e posizioni di camera, registrando tutte le combinazioni in file CSV organizzati secondo i punti chiave (landmark) facciali.
+, superando i limiti dei dataset reali. Qui lo script Python controlla la scena in Blender per produrre diverse direzioni di sguardo e posizioni di camera, registrando tutte le combinazioni in file CSV organizzati secondo i punti chiave (landmark) facciali.
 
 ### Caratteristiche del dataset
 
